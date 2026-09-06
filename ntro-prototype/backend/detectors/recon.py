@@ -22,7 +22,7 @@ def process_conn_line(line: dict) -> dict | None:
     if not src_ip or dst_port == 0:
         return None
 
-    now = time.time()
+    now = ts
     _state[src_ip].append((ts, dst_port, dst_ip))
 
     cutoff = now - WINDOW_SECONDS

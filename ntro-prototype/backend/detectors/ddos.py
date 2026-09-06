@@ -36,7 +36,7 @@ def process_conn_line(line: dict) -> dict | None:
     if proto not in ("tcp",):
         return None
 
-    now = time.time()
+    now = ts
     _window.append((ts, src_ip))
 
     cutoff = now - WINDOW_SECONDS
