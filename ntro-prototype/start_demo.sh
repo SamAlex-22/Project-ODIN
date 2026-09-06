@@ -5,8 +5,10 @@ echo "======================================"
 echo "  NTRO AI Threat Detection Prototype  "
 echo "======================================"
 
-echo "[1/4] Starting Zeek..."
-docker-compose up -d
+echo "[1/4] Starting Zeek & Kafka..."
+docker rm -f zeek_monitor 2>/dev/null || true
+docker-compose down 2>/dev/null || true
+docker-compose up -d --remove-orphans
 echo "Waiting for Kafka (9092)..."
 while ! nc -z localhost 9092; do   
   sleep 1
