@@ -72,7 +72,7 @@ export default function App() {
               <Route path="/live" element={<LiveDetections alerts={alerts} />} />
               <Route path="/analysis" element={<ThreatAnalysis />} />
               <Route path="/investigate" element={<AlertInvestigation alerts={alerts} />} />
-              <Route path="/network" element={<NetworkAnalytics />} />
+              <Route path="/network" element={<NetworkAnalytics alerts={alerts} />} />
               <Route path="/distribution" element={<ThreatDistribution stats={stats} />} />
               <Route path="/health" element={<SystemHealth />} />
               <Route path="/replay" element={<ReplayDemo />} />
