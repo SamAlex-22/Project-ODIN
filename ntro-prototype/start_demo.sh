@@ -19,6 +19,9 @@ echo "[2/4] Starting detection engine (Phase 2: Kafka + PySpark)..."
 python3 backend/kafka_producer.py &
 PRODUCER_PID=$!
 
+# Give the producer 3 seconds to auto-create the Kafka topic before Spark connects
+sleep 3
+
 python3 backend/spark_processor.py &
 SPARK_PID=$!
 
