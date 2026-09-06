@@ -51,18 +51,22 @@ def process_conn_line(line: dict) -> dict | None:
     triggered = False
     reasons   = []
 
-    if unique_ips > UNIQUE_IP_THRESHOLD and entropy < ENTROPY_THRESHOLD:
+    if unique_ips > UNIQUE_IP_THRESHOLD:
         triggered = True
-        reasons.append(f"src_ip_entropy={entropy} (threshold<{ENTROPY_THRESHOLD}), {unique_ips} unique sources in {WINDOW_SECONDS}s")
+        if entropy > ENTROPY_THRESHOLD:
+            reasons.append(f"High src_ip_entropy={entropy} (likely spoofed), {unique_ips} unique sources in {WINDOW_SECONDS}s")
+        else:
+            reasons.append(f"Low src_ip_entropy={entropy} (concentrated botnet), {unique_ips} unique sources in {WINDOW_SECONDS}s")
 
-    if packet_rate > PACKET_RATE_THRESHOLD:
+    # A single IP scanning fast shouldn't trigger DDoS, require at least a small cluster
+    elif packet_rate > PACKET_RATE_THRESHOLD and unique_ips > 5:
         triggered = True
-        reasons.append(f"packet_rate={packet_rate}/10s (threshold>{PACKET_RATE_THRESHOLD})")
+        reasons.append(f"packet_rate={packet_rate}/10s (threshold>{PACKET_RATE_THRESHOLD}) with {unique_ips} sources")
 
     if not triggered:
         return None
 
-    confidence = min(0.5 + (unique_ips / UNIQUE_IP_THRESHOLD) * 0.25 + ((ENTROPY_THRESHOLD - entropy) / ENTROPY_THRESHOLD) * 0.25, 0.99)
+    confidence = min(0.5 + (unique_ips / UNIQUE_IP_THRESHOLD) * 0.25 + (packet_rate / PACKET_RATE_THRESHOLD) * 0.2, 0.99)
 
     return {
         "timestamp":    datetime.utcnow().isoformat() + "Z",
