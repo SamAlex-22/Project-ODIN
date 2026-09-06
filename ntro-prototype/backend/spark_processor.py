@@ -5,6 +5,10 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
 import sys
+import os
+
+# Fix for Java 21+ Hadoop UserGroupInformation crash
+os.environ["_JAVA_OPTIONS"] = "-Djava.security.manager=allow"
 
 # Suppress noisy spark logs
 logging.getLogger("py4j").setLevel(logging.ERROR)
