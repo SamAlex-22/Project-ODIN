@@ -3,3 +3,4 @@ flask-cors==4.0.1
 watchdog==4.0.1
 kafka-python==2.0.2
 pyspark==3.5.0
+sh==2.0.6
