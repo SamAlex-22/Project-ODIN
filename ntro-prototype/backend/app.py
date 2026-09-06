@@ -60,15 +60,18 @@ def health():
 
 @app.route("/api/replay/<scenario>", methods=["POST"])
 def replay_scenario(scenario):
-    script_map = {
-        "ddos": "../traffic/generate_ddos.sh",
-        "recon": "../traffic/generate_recon.sh",
-        "c2": "python3 ../traffic/generate_c2.py"
+    pcap_map = {
+        "ddos": "attack_syn_flood.pcap",
+        "recon": "attack_recon.pcap",
+        "c2": "attack_c2.pcap"
     }
-    if scenario in script_map:
-        cmd = script_map[scenario]
-        # Run in background
-        subprocess.Popen(cmd, shell=True, cwd=str(Path(__file__).parent))
+    if scenario in pcap_map:
+        pcap_file = pcap_map[scenario]
+        # Copy pcap to zeek-logs so Docker can see it
+        os.system(f"cp ../traffic_pcaps/{pcap_file} zeek-logs/")
+        # Tell zeek to read it and append to conn.log
+        cmd = f"docker exec zeek_monitor bash -c 'mkdir -p /tmp/zeek_run && cd /tmp/zeek_run && zeek -r /usr/local/zeek/logs/current/{pcap_file} /usr/local/zeek/share/zeek/site/local.zeek && cat conn.log >> /usr/local/zeek/logs/current/conn.log'"
+        subprocess.Popen(cmd, shell=True)
         return jsonify({"status": "started", "scenario": scenario})
     return jsonify({"error": "Scenario not found"}), 404
 
