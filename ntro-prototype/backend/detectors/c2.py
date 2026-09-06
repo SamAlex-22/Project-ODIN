@@ -35,6 +35,14 @@ def process_conn_line(line: dict) -> dict | None:
         return None
 
     key = (src_ip, dst_ip, dst_port)
+    
+    if not hasattr(process_conn_line, "last_ts"):
+        process_conn_line.last_ts = 0
+    if ts < process_conn_line.last_ts - 5:
+        _connections.clear()
+        _alerted.clear()
+    process_conn_line.last_ts = ts
+    
     _connections[key].append(ts)
     _connections[key].sort()
 

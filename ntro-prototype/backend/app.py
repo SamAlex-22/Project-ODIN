@@ -86,6 +86,10 @@ def stream():
                 current_size = ALERTS_FILE.stat().st_size
             except FileNotFoundError:
                 continue
+            
+            if current_size < last_size:
+                last_size = 0  # Handle file truncation (Reset Demo)
+
             if current_size > last_size:
                 with open(ALERTS_FILE, "r") as f:
                     f.seek(last_size)

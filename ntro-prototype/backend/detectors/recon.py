@@ -23,6 +23,13 @@ def process_conn_line(line: dict) -> dict | None:
         return None
 
     now = ts
+    if not hasattr(process_conn_line, "last_ts"):
+        process_conn_line.last_ts = 0
+    if now < process_conn_line.last_ts - 5:
+        _state.clear()
+        _last_alerted.clear()
+    process_conn_line.last_ts = now
+
     _state[src_ip].append((ts, dst_port, dst_ip))
 
     cutoff = now - WINDOW_SECONDS
