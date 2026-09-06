@@ -29,13 +29,13 @@ cleanup() {
   for pid in "${PIDS[@]}"; do
     kill "$pid" 2>/dev/null || true
   done
-  (cd "$SCRIPT_DIR" && docker-compose down) 2>/dev/null || true
+  (cd "$SCRIPT_DIR" && docker compose down) 2>/dev/null || true
 }
 trap cleanup EXIT
 
 # ---- 1. Docker infrastructure (Kafka + Zeek) ------------------------------
 echo "[1/7] Starting Docker infrastructure (Kafka, Zeek)..."
-(cd "$SCRIPT_DIR" && docker-compose up -d)
+(cd "$SCRIPT_DIR" && docker compose up -d)
 
 # ---- 2. Wait for Kafka to actually be ready -------------------------------
 # Docker reporting the container "up" is not the same as the broker being
@@ -125,7 +125,7 @@ echo "[✓] API started (PID $API_PID)"
 # ---- 7. React dashboard -----------------------------------------------------
 echo "[7/7] Starting dashboard..."
 cd "$SCRIPT_DIR/frontend"
-npm start &
+npm run dev &
 FRONTEND_PID=$!
 PIDS+=("$FRONTEND_PID")
 echo "[✓] Dashboard started (PID $FRONTEND_PID)"

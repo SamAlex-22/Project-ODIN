@@ -1,173 +1,199 @@
-import React, { useState, useEffect } from 'react';
-import AlertFeed from './components/AlertFeed';
-import ThreatChart from './components/ThreatChart';
-import StatusBar from './components/StatusBar';
-import PipelineStatus from './components/PipelineStatus';
+import { useEffect, useState } from 'react'
+import Sidebar from './components/Sidebar'
+import OverviewPage from './pages/OverviewPage'
+import AlertsPage from './pages/AlertsPage'
+import ThreatAnalysisPage from './pages/ThreatAnalysisPage'
+import ArchitecturePage from './pages/ArchitecturePage'
+import './App.css'
 
-const SEVERITY_COLOR = {
-  ddos:  '#ef4444',   // red
-  recon: '#f97316',   // orange
-  c2:    '#a855f7',   // purple
-};
+const MAX_ALERTS = 200
+const THEME_STORAGE_KEY = 'ntro-theme'
+// Conservative safety-net interval: SSE is the primary, fast delivery path
+// for new alerts. This reconciliation poll exists only to recover from a
+// silently stalled EventSource (one that never fires `onerror`) and to
+// dedupe/settle state against the server's own record — not to drive
+// normal updates, so it stays well below SSE's push cadence.
+const RECONCILE_INTERVAL_MS = 10000
 
-const THREAT_LABELS = {
-  ddos:  'DDoS / SYN Flood',
-  recon: 'Recon / Port Scan',
-  c2:    'C2 Beaconing',
-};
+function getInitialTheme() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    if (stored === 'dark' || stored === 'light') return stored
+  } catch {
+    // localStorage unavailable (private mode, disabled storage, etc.) — fall through
+  }
+  return 'dark'
+}
 
-export default function App() {
-  const [alerts, setAlerts]   = useState([]);
-  const [stats, setStats]     = useState({ ddos: 0, recon: 0, c2: 0, total: 0 });
-  const [connected, setConnected] = useState(false);
+function App() {
+  const [alerts, setAlerts] = useState([])
+  const [stats, setStats] = useState({})
+  const [connected, setConnected] = useState(false)
+  const [activePage, setActivePage] = useState('overview')
+  const [theme, setTheme] = useState(getInitialTheme)
 
-  // Poll for alerts/stats on an interval. This is the primary,
-  // authoritative update path: it re-fetches the full current state from
-  // the server every 2s and replaces local state wholesale, so it can't
-  // drift or duplicate, and it keeps working even if the SSE connection
-  // below stalls (a long-lived EventSource through the dev-server proxy
-  // has proven unreliable in practice -- a browser tab's connection can
-  // go stale without a clean visible error). The "connected" badge is
-  // driven by whether this poll succeeds, not by SSE state, so it
-  // actually reflects whether the dashboard is getting live data.
+  // Theme is purely a presentation concern — persisted for convenience,
+  // but unrelated to alerts/stats/connection state or any API call.
   useEffect(() => {
-    const poll = () => {
-      Promise.all([
-        fetch('/api/alerts').then(r => r.json()),
-        fetch('/api/stats').then(r => r.json()),
-      ])
-        .then(([alertsData, statsData]) => {
-          setAlerts(alertsData.slice().reverse());  // newest first
-          setStats(statsData);
-          setConnected(true);
-        })
-        .catch(() => setConnected(false));
-    };
-    poll();
-    const id = setInterval(poll, 2000);
-    return () => clearInterval(id);
-  }, []);
+    document.documentElement.setAttribute('data-theme', theme)
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme)
+    } catch {
+      // persistence is a nice-to-have, not required for the theme to work
+    }
+  }, [theme])
 
-  // SSE is kept as a push-based fast path on top of the polling above --
-  // when it's healthy, new alerts can appear sooner than the next poll
-  // tick. It is not relied on for correctness.
+  // 1 & 2. Initial load: existing alerts + stats
   useEffect(() => {
-    const es = new EventSource('/api/stream');
+    fetch('/api/alerts')
+      .then((r) => r.json())
+      .then((data) => setAlerts([...data].reverse().slice(0, MAX_ALERTS)))
+      .catch(console.error)
+
+    fetch('/api/stats')
+      .then((r) => r.json())
+      .then(setStats)
+      .catch(console.error)
+  }, [])
+
+  // 3 & 4. Live alert stream via SSE + connection status.
+  // De-duplicates by flow_id before prepending: an SSE reconnect can
+  // redeliver an alert already present from the initial load or a prior
+  // message, and the backend's own alert schema already gives us a stable
+  // id for exactly this purpose. An alert missing flow_id is never matched
+  // against anything (it can't cause a false dedup) and is always added.
+  useEffect(() => {
+    const es = new EventSource('/api/stream')
+
+    es.onopen = () => setConnected(true)
 
     es.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'connected') return;
+      const data = JSON.parse(event.data)
+      if (data.type === 'connected') return
 
-      setAlerts(prev => (prev.some(a => a.flow_id && a.flow_id === data.flow_id)
-        ? prev
-        : [data, ...prev].slice(0, 200)));
-    };
+      setAlerts((prev) => {
+        if (data.flow_id && prev.some((a) => a.flow_id && a.flow_id === data.flow_id)) {
+          return prev
+        }
+        return [data, ...prev].slice(0, MAX_ALERTS)
+      })
 
-    return () => es.close();
-  }, []);
+      setStats((prev) => ({
+        ...prev,
+        total: (prev.total || 0) + 1,
+        [data.threat_class]: (prev[data.threat_class] || 0) + 1,
+      }))
+    }
 
-  const clearAlerts = () => {
+    es.onerror = () => setConnected(false)
+
+    return () => es.close()
+  }, [])
+
+  // 5. Reconciliation safety net (see RECONCILE_INTERVAL_MS above). Replaces
+  // local alerts/stats wholesale from the server's own record, so it can
+  // only correct drift/duplicates/missed SSE messages, never introduce them.
+  // A successful poll also recovers `connected` in case the EventSource
+  // stalled without ever firing `onerror`; a failed poll is left for the
+  // next tick rather than forcing an offline flap from one bad request.
+  useEffect(() => {
+    const id = setInterval(() => {
+      Promise.all([
+        fetch('/api/alerts').then((r) => r.json()),
+        fetch('/api/stats').then((r) => r.json()),
+      ])
+        .then(([alertsData, statsData]) => {
+          setAlerts([...alertsData].reverse().slice(0, MAX_ALERTS))
+          setStats(statsData)
+          setConnected(true)
+        })
+        .catch(() => {
+          // Leave `connected` as-is; SSE's own onerror is authoritative for
+          // flipping to offline, so a single failed poll doesn't flap it.
+        })
+    }, RECONCILE_INTERVAL_MS)
+
+    return () => clearInterval(id)
+  }, [])
+
+  // 5. Reset demo
+  const resetDemo = () => {
     fetch('/api/clear', { method: 'POST' })
-      .then(() => { setAlerts([]); setStats({ ddos:0,recon:0,c2:0,total:0 }); });
-  };
+      .then((r) => r.json())
+      .then(() => {
+        setAlerts([])
+        return fetch('/api/stats').then((r) => r.json()).then(setStats)
+      })
+      .catch(console.error)
+  }
+
+  const renderPage = () => {
+    switch (activePage) {
+      case 'alerts':
+        return <AlertsPage alerts={alerts} stats={stats} />
+      case 'threat-analysis':
+        return <ThreatAnalysisPage stats={stats} alerts={alerts} />
+      case 'architecture':
+        return <ArchitecturePage />
+      case 'overview':
+      default:
+        return (
+          <OverviewPage
+            stats={stats}
+            connected={connected}
+            alerts={alerts}
+            onNavigate={setActivePage}
+          />
+        )
+    }
+  }
 
   return (
-    <div style={styles.root}>
-      {/* Header */}
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
-          <span style={styles.logo}>◈</span>
-          <div>
-            <div style={styles.titleRow}>
-              <span style={styles.title}>HYBRID 1</span>
-              <span style={styles.titleSep}>·</span>
-              <span style={styles.titleMid}>Passive Cyber Threat Detection</span>
-            </div>
-            <span style={styles.subtitle}>
-              Unidirectional Network Monitoring Enclave
-            </span>
-          </div>
+    <div className="shell">
+      <header className="shell-topbar">
+        <div className="shell-topbar__brand-block">
+          <span className="shell-topbar__brand">NTRO MONITOR</span>
+          <span className="shell-topbar__tagline">Unidirectional threat monitoring</span>
         </div>
-        <div style={styles.headerRight}>
-          <span style={{
-            ...styles.badge,
-            background: connected ? '#16a34a' : '#dc2626'
-          }}>
-            {connected ? '● LIVE' : '○ OFFLINE'}
+        <div className="shell-topbar__meta">
+          <span className={`shell-topbar__status ${connected ? 'is-live' : 'is-offline'}`}>
+            <span className="status-dot" />
+            {connected ? 'LIVE' : 'OFFLINE'}
           </span>
-          <button style={styles.clearBtn} onClick={clearAlerts}>
+          <span className="shell-topbar__enclave">Monitoring Enclave</span>
+          <div className="theme-toggle" role="group" aria-label="Theme">
+            <button
+              type="button"
+              className={`pill-toggle ${theme === 'dark' ? 'is-active' : ''}`}
+              onClick={() => setTheme('dark')}
+            >
+              Dark
+            </button>
+            <button
+              type="button"
+              className={`pill-toggle ${theme === 'light' ? 'is-active' : ''}`}
+              onClick={() => setTheme('light')}
+            >
+              Light
+            </button>
+          </div>
+          <button type="button" className="btn" onClick={resetDemo}>
             Reset Demo
           </button>
         </div>
       </header>
 
-      {/* Status Bar */}
-      <StatusBar stats={stats} connected={connected} />
-
-      {/* Main Grid */}
-      <div style={styles.grid}>
-        <div style={styles.chartPanel}>
-          <PipelineStatus />
-          <ThreatChart stats={stats} colors={SEVERITY_COLOR} labels={THREAT_LABELS} />
-        </div>
-        <div style={styles.feedPanel}>
-          <AlertFeed
-            alerts={alerts}
-            colors={SEVERITY_COLOR}
-            labels={THREAT_LABELS}
-          />
-        </div>
+      <div className="shell-body">
+        <Sidebar activePage={activePage} onNavigate={setActivePage} />
+        <main className="shell-main">{renderPage()}</main>
       </div>
+
+      <footer className="shell-footer">
+        LIVE/OFFLINE reflects the browser&rsquo;s connection to the monitoring API — not the
+        physical data-diode link itself.
+      </footer>
     </div>
-  );
+  )
 }
 
-const styles = {
-  root: {
-    minHeight: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    background: '#0a0e1a',
-  },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '16px 24px',
-    borderBottom: '1px solid #1e293b',
-    background: '#0f172a',
-  },
-  headerLeft: { display: 'flex', alignItems: 'center', gap: '12px' },
-  logo: { fontSize: '24px', color: '#3b82f6' },
-  titleRow: { display: 'flex', alignItems: 'baseline', gap: '8px' },
-  title: { fontSize: '18px', fontWeight: 'bold', color: '#f1f5f9', letterSpacing: '1px' },
-  titleSep: { color: '#334155' },
-  titleMid: { fontSize: '13px', color: '#94a3b8' },
-  subtitle: { fontSize: '12px', color: '#64748b' },
-  headerRight: { display: 'flex', alignItems: 'center', gap: '12px' },
-  badge: {
-    padding: '4px 12px',
-    borderRadius: '12px',
-    fontSize: '12px',
-    fontWeight: 'bold',
-    color: '#fff',
-  },
-  clearBtn: {
-    padding: '6px 14px',
-    background: '#1e293b',
-    color: '#94a3b8',
-    border: '1px solid #334155',
-    borderRadius: '6px',
-    cursor: 'pointer',
-    fontSize: '12px',
-  },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: '380px 1fr',
-    gap: '16px',
-    padding: '16px 24px',
-    flex: 1,
-  },
-  chartPanel: { display: 'flex', flexDirection: 'column', gap: '16px' },
-  feedPanel: { overflow: 'hidden' },
-};
+export default App

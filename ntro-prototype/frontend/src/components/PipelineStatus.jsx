@@ -1,135 +1,127 @@
-import React, { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react'
 
+// Live consumer of GET /api/pipeline-status only. This component performs
+// no health logic of its own — it renders exactly what the backend reports
+// (real file-mtime/socket checks in backend/app.py:pipeline_status()) and
+// nothing else. If the endpoint is unreachable, that is shown explicitly;
+// it never falls back to assuming everything is online.
+
+const POLL_INTERVAL_MS = 7000
+
+// Each row maps to one field the backend actually returns. `diode` is
+// intentionally excluded from this list and handled separately below: it is
+// the one row the backend itself labels "simulated," so it must never be
+// rendered as a green/red online dot.
 const ROWS = [
-  { key: 'diode',           label: 'Diode / Passive Input' },
-  { key: 'zeek',             label: 'Zeek NSM' },
-  { key: 'kafka',            label: 'Kafka Event Stream' },
-  { key: 'stream_detector',  label: 'Streaming Detector' },
-  { key: 'alert_engine',     label: 'Alert Engine' },
-  { key: 'dashboard',        label: 'Dashboard' },
-];
+  { key: 'zeek', label: 'Zeek NSM' },
+  { key: 'kafka', label: 'Kafka Event Stream' },
+  { key: 'kafka_producer', label: 'Kafka Producer (Zeek → Kafka)' },
+  { key: 'stream_detector', label: 'Stream Processor / Detection Engine' },
+  { key: 'alert_engine', label: 'Alert Engine' },
+]
 
-export default function PipelineStatus() {
-  const [status, setStatus] = useState({});
+function PipelineStatus() {
+  const [status, setStatus] = useState(null)
+  const [error, setError] = useState(false)
 
   useEffect(() => {
+    let cancelled = false
+
     const poll = () => {
       fetch('/api/pipeline-status')
-        .then(r => r.json())
-        .then(setStatus)
-        .catch(() => setStatus({}));
-    };
-    poll();
-    const id = setInterval(poll, 3000);
-    return () => clearInterval(id);
-  }, []);
-
-  const renderIndicator = (key) => {
-    if (key === 'dashboard') {
-      return <span style={{ ...styles.dot, background: '#22c55e' }} />;
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        })
+        .then((data) => {
+          if (cancelled) return
+          setStatus(data)
+          setError(false)
+        })
+        .catch(() => {
+          if (cancelled) return
+          setError(true)
+        })
     }
-    if (key === 'diode') {
-      // Never claim the software enforces physical isolation -- this row
-      // is always "simulated", not a green/red online check.
-      return <span style={styles.simulated}>SIMULATED</span>;
-    }
-    const alive = !!status[key];
-    return <span style={{ ...styles.dot, background: alive ? '#22c55e' : '#ef4444' }} />;
-  };
 
-  const renderText = (key) => {
-    if (key === 'diode') return 'READ-ONLY INGEST';
-    if (key === 'dashboard') return 'ONLINE';
-    return status[key] ? 'ONLINE' : 'OFFLINE';
-  };
+    poll()
+    const id = setInterval(poll, POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [])
+
+  if (error || !status) {
+    return (
+      <div className="panel pipeline-status">
+        <div className="panel-title">Hybrid 1 Pipeline — Live Status</div>
+        <div className="pipeline-status__unavailable">
+          <div className="pipeline-status__unavailable-title">PIPELINE STATUS UNAVAILABLE</div>
+          <div className="pipeline-status__unavailable-body">
+            Unable to retrieve component health.
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const diode = status.diode || {}
 
   return (
-    <div style={styles.panel}>
-      <div style={styles.title}>Hybrid 1 Monitoring Pipeline</div>
-      <div style={styles.rows}>
-        {ROWS.map(({ key, label }) => (
-          <div key={key} style={styles.row}>
-            <div style={styles.rowLeft}>
-              {renderIndicator(key)}
-              <span style={styles.label}>{label}</span>
-            </div>
-            <span style={{
-              ...styles.status,
-              color: key === 'diode' ? '#3b82f6' : (status[key] || key === 'dashboard') ? '#22c55e' : '#ef4444',
-            }}>
-              {renderText(key)}
+    <div className="panel pipeline-status">
+      <div className="panel-title">Hybrid 1 Pipeline — Live Status</div>
+
+      <div className="pipeline-status__rows">
+        <div className="pipeline-status__row">
+          <span className="pipeline-status__row-left">
+            <span className="badge pipeline-status__simulated">
+              {String(diode.status || 'unknown').toUpperCase()}
             </span>
-          </div>
-        ))}
+            <span className="pipeline-status__label">Passive Input</span>
+          </span>
+          <span className="pipeline-status__note">{diode.detail || ''}</span>
+        </div>
+
+        {ROWS.map(({ key, label }) => {
+          const online = status[key] === true
+          return (
+            <div
+              key={key}
+              className={`pipeline-status__row ${online ? 'is-online' : 'is-offline'}`}
+            >
+              <span className="pipeline-status__row-left">
+                <span className="status-dot" />
+                <span className="pipeline-status__label">{label}</span>
+              </span>
+              <span className="pipeline-status__value">{online ? 'ONLINE' : 'OFFLINE'}</span>
+            </div>
+          )
+        })}
+
+        <div className="pipeline-status__row is-online">
+          <span className="pipeline-status__row-left">
+            <span className="status-dot" />
+            <span className="pipeline-status__label">Dashboard</span>
+          </span>
+          <span className="pipeline-status__value">ONLINE</span>
+        </div>
       </div>
-      <div style={styles.divider} />
-      <div style={styles.footerRow}>
-        <span>READ-ONLY INGEST</span>
-        <span style={styles.enabled}>ENABLED</span>
-      </div>
-      <div style={styles.footerRow}>
-        <span>RETURN PATH</span>
-        <span style={styles.none}>NONE</span>
-      </div>
-      <div style={styles.note}>
-        Physical one-way isolation is provided by the deployment boundary
-        (diode/passive tap). This prototype simulates the diode-fed,
-        read-only ingest interface -- the software pipeline has no return
-        path or active response mechanism.
+
+      <div className="pipeline-status__footer">
+        <div className="pipeline-status__footer-row">
+          <span>Read-Only Ingest</span>
+          <span className="pipeline-status__footer-value">
+            {status.read_only_ingest ? 'ENABLED' : 'DISABLED'}
+          </span>
+        </div>
+        <div className="pipeline-status__footer-row">
+          <span>Return Path</span>
+          <span className="pipeline-status__footer-value">{String(status.return_path ?? 'N/A')}</span>
+        </div>
       </div>
     </div>
-  );
+  )
 }
 
-const styles = {
-  panel: {
-    background: '#0f172a',
-    border: '1px solid #1e293b',
-    borderRadius: '8px',
-    padding: '16px',
-  },
-  title: {
-    fontSize: '13px',
-    fontWeight: 'bold',
-    color: '#94a3b8',
-    marginBottom: '12px',
-    textTransform: 'uppercase',
-    letterSpacing: '1px',
-  },
-  rows: { display: 'flex', flexDirection: 'column', gap: '8px' },
-  row: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    fontSize: '12px',
-  },
-  rowLeft: { display: 'flex', alignItems: 'center', gap: '8px' },
-  dot: { width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0 },
-  simulated: {
-    fontSize: '9px',
-    fontWeight: 'bold',
-    color: '#3b82f6',
-    border: '1px solid #3b82f6',
-    borderRadius: '3px',
-    padding: '1px 4px',
-  },
-  label: { color: '#cbd5e1' },
-  status: { fontFamily: 'monospace', fontSize: '11px', fontWeight: 'bold' },
-  divider: { borderTop: '1px solid #1e293b', margin: '12px 0' },
-  footerRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    fontSize: '11px',
-    color: '#64748b',
-    fontFamily: 'monospace',
-    marginBottom: '4px',
-  },
-  enabled: { color: '#22c55e', fontWeight: 'bold' },
-  none: { color: '#94a3b8', fontWeight: 'bold' },
-  note: {
-    marginTop: '10px',
-    fontSize: '11px',
-    color: '#64748b',
-    lineHeight: '1.5',
-  },
-};
+export default PipelineStatus
