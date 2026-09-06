@@ -1,4 +1,5 @@
 venv/
+.venv/
 ntro-prototype/traffic_pcaps/venv/
 __pycache__/
 *.pyc
@@ -7,3 +8,4 @@ node_modules/
 scaffold*.py
 ntro-prototype/backend/zeek-logs/
 ntro-prototype/backend/alerts.json
+ntro-prototype/frontend/build/

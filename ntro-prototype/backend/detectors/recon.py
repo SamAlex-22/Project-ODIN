@@ -1,69 +1,69 @@
-import time
+"""
+Reconnaissance / Port Scan Detector
+-----------------------------------
+Stateful per-source aggregation: tracks unique destination ports and hosts
+each source IP touches within a rolling window. Deliberately simple --
+this is the detector most likely to run live in front of judges, so
+reliability matters more than sophistication here.
+"""
+
 from collections import defaultdict
-from datetime import datetime
+
+from .base import Detector
 
 WINDOW_SECONDS = 60
 PORT_THRESHOLD = 15
 HOST_THRESHOLD = 10
+ALERT_COOLDOWN = 20   # don't re-alert the same source more than once per this many seconds
 
-_state = defaultdict(list)
-_last_alerted = {}
 
-def process_conn_line(line: dict) -> dict | None:
-    try:
-        ts       = float(line.get("ts", 0))
-        src_ip   = line.get("id.orig_h", "")
-        dst_ip   = line.get("id.resp_h", "")
-        dst_port = int(line.get("id.resp_p", 0))
-        proto    = line.get("proto", "")
-    except (ValueError, TypeError):
-        return None
+class ReconDetector(Detector):
+    name = "recon"
+    threat_class = "recon"
+    threat_label = "Reconnaissance"
 
-    if not src_ip or dst_port == 0:
-        return None
+    def __init__(self):
+        self._state = defaultdict(list)   # src_ip -> [(ts, dst_port, dst_ip)]
+        self._last_alerted = {}
 
-    now = ts
-    _state[src_ip].append((ts, dst_port, dst_ip))
+    def process(self, event: dict) -> dict | None:
+        src_ip   = event["src_ip"]
+        dst_ip   = event["dst_ip"]
+        dst_port = event["dst_port"]
+        ts       = event["ts"]
 
-    cutoff = now - WINDOW_SECONDS
-    _state[src_ip] = [e for e in _state[src_ip] if e[0] >= cutoff]
+        if not src_ip or not dst_port:
+            return None
 
-    entries       = _state[src_ip]
-    unique_ports  = len(set(e[1] for e in entries))
-    unique_hosts  = len(set(e[2] for e in entries))
+        self._state[src_ip].append((ts, dst_port, dst_ip))
+        cutoff = ts - WINDOW_SECONDS
+        self._state[src_ip] = [e for e in self._state[src_ip] if e[0] >= cutoff]
 
-    triggered = False
-    reasons   = []
+        entries      = self._state[src_ip]
+        unique_ports = len(set(e[1] for e in entries))
+        unique_hosts = len(set(e[2] for e in entries))
 
-    if unique_ports > PORT_THRESHOLD:
-        triggered = True
-        reasons.append(f"{unique_ports} unique dst ports in {WINDOW_SECONDS}s (threshold>{PORT_THRESHOLD})")
+        triggered = unique_ports > PORT_THRESHOLD or unique_hosts > HOST_THRESHOLD
+        if not triggered:
+            return None
 
-    if unique_hosts > HOST_THRESHOLD:
-        triggered = True
-        reasons.append(f"{unique_hosts} unique dst hosts in {WINDOW_SECONDS}s (threshold>{HOST_THRESHOLD})")
+        if ts - self._last_alerted.get(src_ip, 0) < ALERT_COOLDOWN:
+            return None
+        self._last_alerted[src_ip] = ts
 
-    if not triggered:
-        return None
+        evidence = [
+            f"Unique destination ports: {unique_ports} (threshold>{PORT_THRESHOLD})",
+            f"Unique destination hosts: {unique_hosts} (threshold>{HOST_THRESHOLD})",
+            f"Connection attempts: {len(entries)}",
+            f"Observation window: {WINDOW_SECONDS}s",
+            "Detection reason: horizontal/vertical scanning behavior",
+        ]
 
-    if now - _last_alerted.get(src_ip, 0) < 20:
-        return None
-    _last_alerted[src_ip] = now
+        confidence = 0.6 + min(unique_ports / PORT_THRESHOLD * 0.3, 0.35)
+        severity = "MEDIUM" if unique_ports <= PORT_THRESHOLD * 2 else "HIGH"
 
-    confidence = min(0.5 + (unique_ports / PORT_THRESHOLD) * 0.4, 0.99)
-
-    return {
-        "timestamp":    datetime.utcnow().isoformat() + "Z",
-        "threat_class": "recon",
-        "severity":     2,
-        "confidence":   round(confidence, 2),
-        "src_ip":       src_ip,
-        "evidence": {
-            "unique_dst_ports":   unique_ports,
-            "unique_dst_hosts":   unique_hosts,
-            "window_seconds":     WINDOW_SECONDS,
-            "port_threshold":     PORT_THRESHOLD,
-            "sample_ports":       sorted(set(e[1] for e in entries))[:10],
-            "explanation": "; ".join(reasons)
-        }
-    }
+        return self.alert(
+            src_ip=src_ip, src_port=None, dst_ip=dst_ip, dst_port=dst_port,
+            flow_id=event.get("uid"), severity=severity, confidence=confidence,
+            evidence=evidence, window_seconds=WINDOW_SECONDS,
+        )

@@ -1,19 +1,34 @@
-import json
-import math
-import time
+"""
+DDoS / SYN Flood Detector
+-------------------------
+Primary evidence:   packet rate over a sliding window (the only condition
+                     that actually triggers an alert).
+Supporting evidence: unique source IP count, source-IP entropy.
+
+Earlier version of this detector required low source-IP entropy alongside
+a high unique-IP count, on the theory "spoofed flood = many IPs but all
+hitting one dst = low entropy". That assumption doesn't hold: hping3
+--rand-source draws source IPs uniformly at random, and uniformly random
+values *maximize* entropy rather than lowering it (each of N packets gets
+a distinct source, so entropy grows with N). Gating on low entropy would
+mean the detector never fires against the exact attack it's meant to catch.
+Packet-rate anomaly is the reliable signal regardless of source
+distribution; entropy is now reported as context, never as a gate.
+"""
+
 from collections import defaultdict, deque
-from datetime import datetime
+
+from .base import Detector
 
 WINDOW_SECONDS       = 10
-UNIQUE_IP_THRESHOLD  = 50
-ENTROPY_THRESHOLD    = 2.5
-PACKET_RATE_THRESHOLD = 200
+PACKET_RATE_THRESHOLD = 200   # primary trigger: connections seen in WINDOW_SECONDS
+UNIQUE_IP_SUPPORT     = 50    # supporting evidence only
 
-_window = deque()
 
 def _shannon_entropy(values):
     if not values:
         return 0.0
+    import math
     counts = defaultdict(int)
     for v in values:
         counts[v] += 1
@@ -25,57 +40,55 @@ def _shannon_entropy(values):
             entropy -= p * math.log2(p)
     return round(entropy, 4)
 
-def process_conn_line(line: dict) -> dict | None:
-    try:
-        ts      = float(line.get("ts", 0))
-        src_ip  = line.get("id.orig_h", "")
-        proto   = line.get("proto", "")
-    except (ValueError, TypeError):
-        return None
 
-    if proto not in ("tcp",):
-        return None
+class DDoSDetector(Detector):
+    name = "ddos"
+    threat_class = "ddos"
+    threat_label = "DDoS / SYN Flood"
 
-    now = ts
-    _window.append((ts, src_ip))
+    def __init__(self):
+        self._window = deque()   # [(ts, src_ip, dst_port)]
 
-    cutoff = now - WINDOW_SECONDS
-    while _window and _window[0][0] < cutoff:
-        _window.popleft()
+    def process(self, event: dict) -> dict | None:
+        if event.get("proto") != "tcp":
+            return None
 
-    recent_ips    = [entry[1] for entry in _window]
-    unique_ips    = len(set(recent_ips))
-    packet_rate   = len(recent_ips)
-    entropy       = _shannon_entropy(recent_ips)
+        ts       = event["ts"]
+        src_ip   = event["src_ip"]
+        dst_ip   = event["dst_ip"]
+        dst_port = event["dst_port"]
 
-    triggered = False
-    reasons   = []
+        self._window.append((ts, src_ip, dst_port))
+        cutoff = ts - WINDOW_SECONDS
+        while self._window and self._window[0][0] < cutoff:
+            self._window.popleft()
 
-    if unique_ips > UNIQUE_IP_THRESHOLD and entropy < ENTROPY_THRESHOLD:
-        triggered = True
-        reasons.append(f"src_ip_entropy={entropy} (threshold<{ENTROPY_THRESHOLD}), {unique_ips} unique sources in {WINDOW_SECONDS}s")
+        recent      = self._window
+        recent_ips  = [e[1] for e in recent]
+        packet_rate = len(recent)
+        unique_ips  = len(set(recent_ips))
+        entropy     = _shannon_entropy(recent_ips)
 
-    if packet_rate > PACKET_RATE_THRESHOLD:
-        triggered = True
-        reasons.append(f"packet_rate={packet_rate}/10s (threshold>{PACKET_RATE_THRESHOLD})")
+        if packet_rate <= PACKET_RATE_THRESHOLD:
+            return None
 
-    if not triggered:
-        return None
+        evidence = [
+            f"Packet rate: {packet_rate} connections/{WINDOW_SECONDS}s (threshold>{PACKET_RATE_THRESHOLD})",
+            f"Unique source IPs: {unique_ips}",
+            f"Source IP entropy: {entropy} bits (informational, not a trigger condition)",
+            f"Destination port: {dst_port}",
+            f"Observation window: {WINDOW_SECONDS}s",
+        ]
+        if unique_ips > UNIQUE_IP_SUPPORT:
+            evidence.append(f"Supporting evidence: {unique_ips} unique sources exceeds {UNIQUE_IP_SUPPORT}")
+        if unique_ips > 1:
+            evidence.append("src_ip reflects only the most recent packet -- sources appear randomized/spoofed")
 
-    confidence = min(0.5 + (unique_ips / UNIQUE_IP_THRESHOLD) * 0.25 + ((ENTROPY_THRESHOLD - entropy) / ENTROPY_THRESHOLD) * 0.25, 0.99)
+        confidence = 0.6 + min((packet_rate / PACKET_RATE_THRESHOLD - 1) * 0.15, 0.35)
+        severity = "CRITICAL" if packet_rate > PACKET_RATE_THRESHOLD * 3 else "HIGH"
 
-    return {
-        "timestamp":    datetime.utcnow().isoformat() + "Z",
-        "threat_class": "ddos",
-        "severity":     3,
-        "confidence":   round(confidence, 2),
-        "src_ip":       src_ip,
-        "evidence": {
-            "unique_source_ips":  unique_ips,
-            "packet_rate_10s":    packet_rate,
-            "source_ip_entropy":  entropy,
-            "entropy_threshold":  ENTROPY_THRESHOLD,
-            "window_seconds":     WINDOW_SECONDS,
-            "explanation": "; ".join(reasons)
-        }
-    }
+        return self.alert(
+            src_ip=src_ip, src_port=None, dst_ip=dst_ip, dst_port=dst_port,
+            flow_id=event.get("uid"), severity=severity, confidence=confidence,
+            evidence=evidence, window_seconds=WINDOW_SECONDS,
+        )

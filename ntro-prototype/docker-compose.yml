@@ -1,9 +1,21 @@
-version: "3.8"
-
 services:
+  kafka:
+    image: apache/kafka:latest
+    container_name: kafka
+    network_mode: host
+    restart: unless-stopped
+    # Single-node KRaft mode (no Zookeeper) -- this is the lightweight
+    # prototype stand-in for a "Kafka-class" durable event bus. Deliberately
+    # no KAFKA_* env overrides: the image's entrypoint only applies its
+    # (already-correct, localhost:9092) single-node defaults when zero
+    # KAFKA_* vars are set -- setting even one disables that logic and
+    # requires specifying the entire KRaft config by hand.
+
   zeek:
     image: zeek/zeek:latest
     container_name: zeek_monitor
+    depends_on:
+      - kafka
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -11,6 +23,7 @@ services:
     volumes:
       - ./zeek/local.zeek:/usr/local/zeek/share/zeek/site/local.zeek
       - ./backend/zeek-logs:/usr/local/zeek/logs/current
+    working_dir: /usr/local/zeek/logs/current
     command: >
       zeek -i lo
       /usr/local/zeek/share/zeek/site/local.zeek
