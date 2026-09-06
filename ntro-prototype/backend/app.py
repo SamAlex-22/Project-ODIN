@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import subprocess
 from pathlib import Path
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
@@ -33,7 +34,7 @@ def get_alerts():
 @app.route("/api/stats")
 def get_stats():
     alerts = read_alerts(500)
-    stats = {"ddos": 0, "recon": 0, "c2": 0, "total": len(alerts)}
+    stats = {"ddos": 0, "recon": 0, "c2": 0, "dga": 0, "exfiltration": 0, "malware": 0, "total": len(alerts)}
     for a in alerts:
         tc = a.get("threat_class", "")
         if tc in stats:
@@ -44,6 +45,32 @@ def get_stats():
 def clear_alerts():
     ALERTS_FILE.write_text("")
     return jsonify({"status": "cleared"})
+
+@app.route("/api/health")
+def health():
+    return jsonify({
+        "status": "HEALTHY",
+        "ingest": "ACTIVE",
+        "kafka": "ONLINE",
+        "flink": "ONLINE",
+        "database": "ONLINE",
+        "throughput_mbps": 1.2,
+        "latency_ms": 45
+    })
+
+@app.route("/api/replay/<scenario>", methods=["POST"])
+def replay_scenario(scenario):
+    script_map = {
+        "ddos": "../traffic/generate_ddos.sh",
+        "recon": "../traffic/generate_recon.sh",
+        "c2": "python3 ../traffic/generate_c2.py"
+    }
+    if scenario in script_map:
+        cmd = script_map[scenario]
+        # Run in background
+        subprocess.Popen(cmd, shell=True, cwd=str(Path(__file__).parent))
+        return jsonify({"status": "started", "scenario": scenario})
+    return jsonify({"error": "Scenario not found"}), 404
 
 @app.route("/api/stream")
 def stream():
