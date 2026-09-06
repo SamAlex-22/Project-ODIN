@@ -7,15 +7,21 @@ echo "======================================"
 
 echo "[1/4] Starting Zeek..."
 docker-compose up -d
+echo "Waiting for Kafka (9092)..."
+while ! nc -z localhost 9092; do   
+  sleep 1
+done
 sleep 3
 
-echo "[2/4] Starting detection engine..."
-cd backend
-python3 watcher.py &
-WATCHER_PID=$!
-echo "      Detection engine PID: $WATCHER_PID"
+echo "[2/4] Starting detection engine (Phase 2: Kafka + PySpark)..."
+python3 backend/kafka_producer.py &
+PRODUCER_PID=$!
+
+python3 backend/spark_processor.py &
+SPARK_PID=$!
 
 echo "[3/4] Starting API server..."
+cd backend
 python3 app.py &
 API_PID=$!
 echo "      API server PID: $API_PID"
@@ -34,5 +40,5 @@ echo "======================================"
 echo ""
 echo "Press Ctrl+C to stop all services."
 
-trap "kill $WATCHER_PID $API_PID; docker-compose down" EXIT
+trap "kill $PRODUCER_PID $SPARK_PID $API_PID; docker-compose down" EXIT
 wait
