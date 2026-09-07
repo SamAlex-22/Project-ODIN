@@ -2,7 +2,8 @@ services:
   kafka:
     image: apache/kafka:latest
     container_name: kafka
-    network_mode: host
+    ports:
+      - "9092:9092"
     restart: unless-stopped
     # Single-node KRaft mode (no Zookeeper) -- this is the lightweight
     # prototype stand-in for a "Kafka-class" durable event bus. Deliberately
