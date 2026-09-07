@@ -44,11 +44,27 @@ const THREAT_DEFINITIONS = {
 // AlertFeed for the selected class's alerts instead of duplicating rendering.
 function ThreatAnalysisPage({ stats, alerts }) {
   const [selected, setSelected] = useState('ddos')
+  const [replayState, setReplayState] = useState({ status: 'idle' })
 
   const definition = THREAT_DEFINITIONS[selected]
   const safeAlerts = Array.isArray(alerts) ? alerts : []
   const relatedAlerts = safeAlerts.filter((alert) => alert && alert.threat_class === selected)
   const count = stats?.[selected] ?? 0
+
+  // Replays a pre-recorded pcap for the selected threat through the same
+  // live pipeline real traffic uses (see backend/app.py's /api/replay) --
+  // a reliable, on-demand way to trigger a specific detection for a demo,
+  // instead of depending on manually timed traffic generator scripts.
+  const runReplay = () => {
+    setReplayState({ status: 'running' })
+    fetch(`/api/replay/${selected}`, { method: 'POST' })
+      .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+      .then(({ ok, body }) => {
+        if (!ok) throw new Error(body.message || 'replay failed')
+        setReplayState({ status: 'done', events: body.events_injected })
+      })
+      .catch((err) => setReplayState({ status: 'error', message: err.message }))
+  }
 
   return (
     <div className="page">
@@ -66,7 +82,10 @@ function ThreatAnalysisPage({ stats, alerts }) {
             aria-selected={selected === key}
             className={`pill-toggle ${selected === key ? 'is-active' : ''}`}
             style={{ '--tab-accent': def.accent }}
-            onClick={() => setSelected(key)}
+            onClick={() => {
+              setSelected(key)
+              setReplayState({ status: 'idle' })
+            }}
           >
             {def.label}
           </button>
@@ -81,6 +100,27 @@ function ThreatAnalysisPage({ stats, alerts }) {
           <span className="threat-detail__count">{count} DETECTED</span>
         </div>
         <p className="threat-detail__summary">{definition.summary}</p>
+
+        <div className="threat-detail__replay">
+          <button
+            type="button"
+            className="btn"
+            onClick={runReplay}
+            disabled={replayState.status === 'running'}
+          >
+            {replayState.status === 'running' ? 'Replaying…' : `Replay ${definition.label} Traffic`}
+          </button>
+          {replayState.status === 'done' && (
+            <span className="threat-detail__replay-note is-ok">
+              Injected {replayState.events} events from a recorded pcap into the live pipeline.
+            </span>
+          )}
+          {replayState.status === 'error' && (
+            <span className="threat-detail__replay-note is-error">
+              Replay failed: {replayState.message}
+            </span>
+          )}
+        </div>
         <div className="threat-detail__signals">
           <span className="threat-detail__signals-title">
             Evidence signals used by this detector

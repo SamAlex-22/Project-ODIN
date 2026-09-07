@@ -7,7 +7,7 @@ import ActiveDetectors from '../components/ActiveDetectors'
 // Answers "what is happening right now" — headline stats, threat
 // distribution, and the live feed, in one screen. Connection status has
 // exactly one authoritative home: the global topbar (see App.jsx).
-function OverviewPage({ stats, connected, alerts, onNavigate }) {
+function OverviewPage({ stats, throughput, connected, alerts, onNavigate }) {
   return (
     <div className="page">
       <div className="page-intro">
@@ -24,7 +24,7 @@ function OverviewPage({ stats, connected, alerts, onNavigate }) {
         </p>
       )}
 
-      <StatusBar stats={stats} />
+      <StatusBar stats={stats} throughput={throughput} />
 
       <div className="overview-grid">
         <div className="overview-grid__left">

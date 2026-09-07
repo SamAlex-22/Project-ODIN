@@ -23,6 +23,11 @@ services:
     volumes:
       - ./zeek/local.zeek:/usr/local/zeek/share/zeek/site/local.zeek
       - ./backend/zeek-logs:/usr/local/zeek/logs/current
+      # Read-only pcaps for the dashboard's per-threat replay button (see
+      # /api/replay in app.py) -- a second, offline `zeek -r` invocation
+      # inside this same container reads from here into a scratch dir,
+      # never touching the live -i lo process or its working_dir above.
+      - ./traffic_pcaps:/pcaps:ro
     working_dir: /usr/local/zeek/logs/current
     command: >
       zeek -i lo

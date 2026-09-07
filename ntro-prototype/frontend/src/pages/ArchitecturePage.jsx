@@ -1,7 +1,27 @@
 import HybridPipeline from '../components/HybridPipeline'
-import ActiveDetectors from '../components/ActiveDetectors'
+import ThreatCoverageMatrix from '../components/ThreatCoverageMatrix'
 import PipelineStatus from '../components/PipelineStatus'
 import { STAGES } from '../data/pipelineStages'
+
+// Why the architecture combines an NSM front-end with a streaming
+// back-end, rather than using either alone -- the "Hybrid" in Hybrid 1.
+// Each row states one family's specific weakness and what the other
+// family contributes to resolve it; this is the actual design reasoning,
+// not a marketing pitch.
+const HYBRID_RATIONALE = [
+  {
+    title: 'NSM front-end (Zeek) alone',
+    body: 'Protocol-aware, security-proven, produces the structured fields (dns.log, ssl.log, conn.log) every detector needs. But it has no native ML inference path and no horizontal scaling — a single Zeek process is the throughput ceiling.',
+  },
+  {
+    title: 'Streaming back-end (Kafka + a stream processor) alone',
+    body: 'Horizontally scalable, decouples ingest rate from processing rate, natively suited to the windowed statistics detection needs (rates, fan-out, timing). But it cannot parse a TLS ClientHello or a DNS query from raw packets — it needs an upstream protocol parser or it has nothing to compute features from.',
+  },
+  {
+    title: 'Combined',
+    body: 'Zeek\'s structured log output becomes Kafka\'s streaming input. Neither family\'s weakness is present in the combination: protocol parsing is solved once (by Zeek, not reimplemented), and windowed feature computation scales independently of Zeek\'s own throughput ceiling.',
+  },
+]
 
 // Three architectural properties, not runtime metrics — matched to the
 // software's actual, verifiable behavior (no return path exists in the
@@ -101,6 +121,21 @@ function ArchitecturePage() {
         </div>
       </div>
 
+      {/* SECTION 1b — Why "Hybrid": the design reasoning behind combining an
+          NSM front-end with a streaming back-end, not just a components list. */}
+      <div className="panel why-hybrid">
+        <SectionLabel eyebrow="Architecture" caption="Why the system is designed this way" />
+        <div className="panel-title">Why "Hybrid" — NSM + Streaming</div>
+        <div className="why-hybrid__grid">
+          {HYBRID_RATIONALE.map((item) => (
+            <div key={item.title} className="why-hybrid__item">
+              <div className="why-hybrid__item-title">{item.title}</div>
+              <p className="why-hybrid__item-body">{item.body}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* SECTION 2 + 3 — One-way security boundary | Hybrid 1 pipeline (detailed) */}
       <div className="architecture-grid">
         <div className="panel security-boundary">
@@ -150,6 +185,9 @@ function ArchitecturePage() {
               <div key={stage.name} className="responsibility-grid__item">
                 <div className="responsibility-grid__name">{stage.name}</div>
                 <div className="responsibility-grid__role">{stage.responsibility}</div>
+                {stage.fullDesign && (
+                  <div className="responsibility-grid__full-design">{stage.fullDesign}</div>
+                )}
               </div>
             ))}
           </div>
@@ -164,10 +202,10 @@ function ArchitecturePage() {
         </div>
       </div>
 
-      {/* SECTION 5 + 7 — Active detectors | Data flow */}
+      {/* SECTION 5 + 7 — Threat coverage (all six PS classes) | Data flow */}
       <div className="architecture-grid">
         <div className="panel architecture-section">
-          <ActiveDetectors />
+          <ThreatCoverageMatrix />
         </div>
 
         <div className="panel data-flow">

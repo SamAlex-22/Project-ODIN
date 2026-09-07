@@ -8,4 +8,6 @@ node_modules/
 scaffold*.py
 ntro-prototype/backend/zeek-logs/
 ntro-prototype/backend/alerts.json
+ntro-prototype/backend/.throughput
 ntro-prototype/frontend/build/
+ntro-prototype/frontend/dist/

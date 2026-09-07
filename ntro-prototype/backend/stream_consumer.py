@@ -14,6 +14,7 @@ change.
 
 import json
 import time
+from collections import deque
 from pathlib import Path
 
 from kafka import KafkaConsumer
@@ -25,6 +26,8 @@ TOPIC           = "zeek-conn"
 GROUP_ID        = "ntro-stream-consumer"
 ALERTS_FILE     = Path("alerts.json")
 HEARTBEAT_FILE  = Path(".heartbeat")
+THROUGHPUT_FILE = Path(".throughput")
+THROUGHPUT_WINDOW_SECONDS = 10
 
 
 def normalize_event(raw: dict) -> dict | None:
@@ -78,6 +81,17 @@ def touch_heartbeat():
         pass
 
 
+def write_throughput(rate: float, total: int):
+    try:
+        THROUGHPUT_FILE.write_text(json.dumps({
+            "events_per_sec": round(rate, 1),
+            "total_events": total,
+            "updated": time.time(),
+        }))
+    except OSError:
+        pass
+
+
 def run():
     ALERTS_FILE.touch()
     consumer = connect_consumer()
@@ -86,12 +100,21 @@ def run():
           + ", ".join(d.name for d in detectors))
 
     consumed = 0
+    recent_arrivals = deque()   # wall-clock times of recently consumed events
     for message in consumer:
         touch_heartbeat()
         event = normalize_event(message.value)
         if event is None:
             continue
         consumed += 1
+
+        now = time.time()
+        recent_arrivals.append(now)
+        cutoff = now - THROUGHPUT_WINDOW_SECONDS
+        while recent_arrivals and recent_arrivals[0] < cutoff:
+            recent_arrivals.popleft()
+        write_throughput(len(recent_arrivals) / THROUGHPUT_WINDOW_SECONDS, consumed)
+
         if consumed % 25 == 0:
             print(f"[STREAM] {consumed} events consumed from Kafka")
 

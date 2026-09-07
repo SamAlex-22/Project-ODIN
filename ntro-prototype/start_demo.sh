@@ -132,7 +132,7 @@ echo "[✓] Dashboard started (PID $FRONTEND_PID)"
 
 echo ""
 echo "=================================================="
-echo "  Dashboard: http://localhost:3000                "
+echo "  Dashboard: http://localhost:5173                "
 echo "  API:       http://localhost:5000                "
 echo "=================================================="
 echo ""

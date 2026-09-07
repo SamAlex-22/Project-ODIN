@@ -28,6 +28,7 @@ function getInitialTheme() {
 function App() {
   const [alerts, setAlerts] = useState([])
   const [stats, setStats] = useState({})
+  const [throughput, setThroughput] = useState({})
   const [connected, setConnected] = useState(false)
   const [activePage, setActivePage] = useState('overview')
   const [theme, setTheme] = useState(getInitialTheme)
@@ -116,6 +117,25 @@ function App() {
     return () => clearInterval(id)
   }, [])
 
+  // Throughput deserves its own faster poll, separate from the 10s
+  // alerts/stats reconciliation above: it's a live "is this pipeline doing
+  // something right now" indicator (driven by stream_consumer.py's own
+  // rolling window, see backend/app.py's /api/throughput), most useful
+  // when it visibly reacts within a couple seconds of pressing a replay
+  // button -- 10s would make it feel unresponsive for that purpose.
+  const THROUGHPUT_INTERVAL_MS = 2000
+  useEffect(() => {
+    const poll = () => {
+      fetch('/api/throughput')
+        .then((r) => r.json())
+        .then(setThroughput)
+        .catch(() => {})
+    }
+    poll()
+    const id = setInterval(poll, THROUGHPUT_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [])
+
   // 5. Reset demo
   const resetDemo = () => {
     fetch('/api/clear', { method: 'POST' })
@@ -140,6 +160,7 @@ function App() {
         return (
           <OverviewPage
             stats={stats}
+            throughput={throughput}
             connected={connected}
             alerts={alerts}
             onNavigate={setActivePage}

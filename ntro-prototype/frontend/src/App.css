@@ -574,6 +574,26 @@
   color: var(--text-secondary);
 }
 
+.threat-detail__replay {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.threat-detail__replay-note {
+  font-size: var(--text-sm);
+}
+
+.threat-detail__replay-note.is-ok {
+  color: var(--status-live);
+}
+
+.threat-detail__replay-note.is-error {
+  color: var(--status-offline);
+}
+
 /* ==================================================
    Architecture page
    ================================================== */
@@ -884,6 +904,142 @@
   font-size: var(--text-xs);
   color: var(--text-tertiary);
   margin-top: 1px;
+}
+
+.responsibility-grid__full-design {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+  line-height: 1.4;
+}
+
+/* ==================================================
+   Why-Hybrid rationale panel
+   ================================================== */
+
+.why-hybrid {
+  padding: var(--space-4) 18px;
+}
+
+.why-hybrid__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+@media (max-width: 720px) {
+  .why-hybrid__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.why-hybrid__item {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+
+.why-hybrid__item-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.why-hybrid__item-body {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Full-design note under a detailed pipeline stage box */
+.pipeline__full-design {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.pipeline__full-design-label {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* ==================================================
+   Threat coverage matrix (Architecture page — all six
+   PS-required classes, implemented vs. designed)
+   ================================================== */
+
+.threat-coverage__subtitle {
+  display: block;
+  margin-top: 2px;
+  margin-bottom: var(--space-3);
+  line-height: 1.4;
+}
+
+.threat-coverage__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.threat-coverage__row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+
+.threat-coverage__row-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.threat-coverage__accent {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.threat-coverage__label {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  flex: 1;
+}
+
+.threat-coverage__status {
+  color: var(--text-tertiary);
+}
+
+.threat-coverage__status--implemented {
+  color: var(--status-live);
+}
+
+.threat-coverage__status--designed {
+  color: var(--status-warning);
+}
+
+.threat-coverage__approach {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+
+.threat-coverage__detail {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.4;
 }
 
 /* ==================================================

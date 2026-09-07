@@ -46,6 +46,11 @@ function HybridPipeline({ compact = false, showProperties = true }) {
                   {stage.name}
                 </div>
                 <div className="pipeline__note">{stage.description}</div>
+                {stage.fullDesign && (
+                  <div className="pipeline__full-design">
+                    <span className="pipeline__full-design-label">Full design:</span> {stage.fullDesign}
+                  </div>
+                )}
               </div>
               {i < STAGES.length - 1 && <div className="pipeline__arrow">↓</div>}
             </div>
