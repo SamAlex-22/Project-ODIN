@@ -1,0 +1,21 @@
+{
+  "confusion_matrix": {
+    "tp": 2386,
+    "fp": 0,
+    "tn": 4478,
+    "fn": 0
+  },
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "false_positive_rate": 0.0,
+  "false_negative_rate": 0.0,
+  "accuracy": 1.0,
+  "test_set_size": 6864,
+  "detector": "recon",
+  "n_train_rows": 33561,
+  "n_test_rows": 6864,
+  "grouping": "session_id",
+  "notes": "Real nmap -sT TCP-connect scans + benign TCP connect() bursts, loopback + multi-host.",
+  "generated_at": "2026-09-14T15:42:47Z"
+}

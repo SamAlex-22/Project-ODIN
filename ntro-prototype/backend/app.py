@@ -4,8 +4,12 @@ import socket
 import subprocess
 import time
 from pathlib import Path
+import joblib
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
+
+import alert_export
+import forensic_chain
 
 app = Flask(__name__)
 CORS(app)
@@ -23,6 +27,13 @@ REPLAY_PCAPS = {
     "ddos":  "attack_syn_flood.pcap",
     "recon": "attack_recon.pcap",
     "c2":    "attack_c2.pcap",
+    "dga":   "attack_dns_tunnel.pcap",
+    # Real (not scapy-synthesized) captures: a throttled ~800KB HTTPS/HTTP
+    # upload to a local loopback sink, shaped to land in the same
+    # bulk-upload feature region the tls/exfil models were trained on --
+    # see traffic_pcaps/generate_pcaps.py for exactly how these were built.
+    "tls":   "attack_tls_malware.pcap",
+    "exfil": "attack_exfil.pcap",
 }
 
 def read_alerts(limit: int = 100) -> list:
@@ -44,15 +55,140 @@ def get_alerts():
     alerts = read_alerts(limit)
     return jsonify(alerts)
 
+@app.route("/api/alerts/stix")
+def get_alerts_stix():
+    """STIX 2.1 Bundle export, for air-gapped SOC/TIP integration (PS
+    26145's standardized-alert-schema requirement) -- see alert_export.py.
+    On-demand pull; stream_consumer.py also writes this continuously to
+    backend/alerts.stix.jsonl for a tailing integration."""
+    limit = int(request.args.get("limit", 100))
+    bundle = alert_export.to_stix_bundle(read_alerts(limit))
+    return Response(json.dumps(bundle), mimetype="application/stix+json")
+
+
+@app.route("/api/alerts/cef")
+def get_alerts_cef():
+    """CEF syslog-line export, for air-gapped SOC/SIEM integration -- see
+    alert_export.py. On-demand pull; stream_consumer.py also writes this
+    continuously to backend/alerts.cef.log for a tailing integration."""
+    limit = int(request.args.get("limit", 100))
+    lines = alert_export.to_cef_lines(read_alerts(limit))
+    return Response("\n".join(lines), mimetype="text/plain")
+
+
+@app.route("/api/alerts/verify")
+def verify_alerts_chain():
+    """Forensic chain-of-custody check (PS 26145: 'preserves a clean chain
+    of custody for forensic use') -- independently recomputes the SHA-256
+    hash chain over the full alerts.json from genesis and reports whether
+    every record is provably unmodified since it was written. See
+    forensic_chain.py. Read-only; safe to call repeatedly (e.g. a "Verify
+    Chain Integrity" button)."""
+    return jsonify(forensic_chain.verify_chain(ALERTS_FILE))
+
+
 @app.route("/api/stats")
 def get_stats():
     alerts = read_alerts(500)
-    stats = {"ddos": 0, "recon": 0, "c2": 0, "total": len(alerts)}
+    stats = {
+        "ddos": 0, "recon": 0, "c2": 0, "dga": 0, "tls": 0, "exfil": 0,
+        "MULTI_VECTOR": 0, "MULTI_VECTOR_ANOMALY": 0, "total": len(alerts),
+    }
     for a in alerts:
         tc = a.get("threat_class", "")
         if tc in stats:
             stats[tc] += 1
     return jsonify(stats)
+
+
+# name -> (base model filename, calibrated model filename, F1, validated_on)
+# F1/validated_on are pulled straight from ML_MODELS.md, not recomputed here --
+# this endpoint reports load status, not model quality.
+DETECTOR_MODELS = {
+    "ddos":  ("ddos_model.joblib",       "ddos_model_calibrated.joblib",       1.000, "real traffic, in-repo (SYN+UDP+spoofed floods) + rule-based slow-exhaustion path"),
+    "recon": ("recon_model_v3.joblib",   "recon_model_v3_calibrated.joblib",   1.000, "real traffic, in-repo (nmap scans)"),
+    "c2":    ("c2_model.joblib",         "c2_model_calibrated.joblib",         0.9994, "real traffic, in-repo (beacon emulator, incl. 2026-09-11 range extension)"),
+    "dga":   ("dga_model.joblib",        "dga_model_calibrated.joblib",        0.99,  "synthetic (9 published DGA algorithm families) + bidirectional tunnel rule"),
+    "tls":   ("tls_flow_model.joblib",   "tls_flow_model_calibrated.joblib",   1.00,  "real TLS+QUIC traffic (incl. packet-sequence features) + synthetic malicious"),
+    "exfil": ("exfil_model.joblib",      "exfil_model_calibrated.joblib",      1.000, "real traffic + synthetic top-up"),
+}
+ML_MODELS_DIR = Path("ml_models")
+
+
+@app.route("/api/detector_status")
+def detector_status():
+    """Real per-detector load status -- tries the calibrated model first
+    (matching each detector's own _load_model()), falls back to the base
+    model, and only reports model_missing if neither file exists. F1/
+    validated_on are static context from ML_MODELS.md, not live-computed."""
+    result = {}
+    for name, (base_file, cal_file, f1, validated_on) in DETECTOR_MODELS.items():
+        cal_path = ML_MODELS_DIR / cal_file
+        base_path = ML_MODELS_DIR / base_file
+        path = cal_path if cal_path.exists() else base_path
+        if not path.exists():
+            result[name] = {"status": "model_missing", "f1": f1, "validated_on": validated_on}
+            continue
+        try:
+            joblib.load(path)
+            result[name] = {
+                "status": "ok",
+                "calibrated": path == cal_path,
+                "f1": f1,
+                "validated_on": validated_on,
+            }
+        except Exception as e:
+            result[name] = {"status": "error", "detail": str(e), "f1": f1, "validated_on": validated_on}
+    return jsonify(result)
+
+# docs/ lives at the repo root; app.py is normally run with cwd=backend/
+# (see the relative ALERTS_FILE/CONN_LOG paths above), so this is resolved
+# from __file__ rather than assumed relative to cwd.
+DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+METRICS_DIR = DOCS_DIR / "metrics"
+BENCHMARK_FILE = DOCS_DIR / "benchmark_results.json"
+
+
+@app.route("/api/model_metrics")
+def model_metrics():
+    """Per-detector precision/recall/F1/false-positive-rate/false-negative-
+    rate/confusion-matrix (from each detector's held-out test set --
+    training/metrics_utils.py, written by each training/train_*.py run)
+    merged with per-detector inference latency and the pipeline's overall
+    sustained throughput (scripts/benchmark_throughput.py's output).
+
+    Reads both sources fresh on every request rather than pre-aggregating
+    into a third file, so there is no separate cache that can go stale
+    relative to docs/metrics/*.json or docs/benchmark_results.json --
+    whichever was most recently regenerated by re-running training/
+    benchmarking is what this endpoint reports."""
+    per_detector = {}
+    for path in sorted(METRICS_DIR.glob("*.json")):
+        try:
+            per_detector[path.stem] = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+
+    latency_by_detector = {}
+    throughput_summary = {}
+    try:
+        bench = json.loads(BENCHMARK_FILE.read_text())
+        latency_by_detector = bench.get("per_detector_latency_ms", {})
+        throughput_summary = {
+            "sustained_flows_per_sec": bench.get("sustained_flows_per_sec"),
+            "measurement_scope": bench.get("measurement_scope"),
+            "hardware": bench.get("hardware"),
+            "timestamp": bench.get("timestamp"),
+        }
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    for name, latency_ms in latency_by_detector.items():
+        if name in per_detector:
+            per_detector[name]["inference_latency_ms"] = latency_ms
+
+    return jsonify({"detectors": per_detector, "throughput": throughput_summary})
+
 
 def _recent_mtime(path: Path) -> bool:
     try:
@@ -104,6 +240,14 @@ def throughput():
     return jsonify({"events_per_sec": 0, "total_events": 0})
 
 
+# The Kafka-forwarded logs (see kafka_producer.py's LOG_TOPICS) -- a replay
+# pcap only ever produces a subset of these (a DNS-tunnel pcap makes
+# dns.log+conn.log but never ssl.log; a TLS pcap makes ssl.log+conn.log but
+# never dns.log), so /api/replay below reads back whichever exist rather
+# than assuming conn.log is the only one that matters.
+REPLAY_LOG_FILES = ["conn.log", "dns.log", "ssl.log", "quic.log"]
+
+
 @app.route("/api/replay/<threat>", methods=["POST"])
 def replay(threat):
     """Replays a pre-recorded pcap for one threat class through the same
@@ -114,15 +258,21 @@ def replay(threat):
     container) rather than tcpreplay: tcpreplay needs raw-socket
     privileges and a passwordless sudo setup that can't be relied on to
     work unattended in front of a jury, while Zeek reading the same pcap
-    offline produces byte-identical conn.log output with no such
-    dependency. The offline read runs in its own scratch directory inside
-    the container -- it never touches the live `-i lo` process or its log.
+    offline produces byte-identical log output with no such dependency.
+    The offline read runs in its own scratch directory inside the
+    container -- it never touches the live `-i lo` process or its logs.
 
-    Replayed events' timestamps are shifted so the earliest one lands at
-    "now" (preserving the pcap's original relative spacing) before being
-    appended to the live conn.log -- otherwise a years-old baked-in
-    timestamp would break every detector's rolling-window cutoff math,
-    which assumes appended-order roughly tracks ts order.
+    Injects into every Kafka-forwarded log the pcap actually produced, not
+    just conn.log -- the DGA detector needs dns.log's query/qtype/answers
+    fields and the TLS detector needs ssl.log's ja3/ja4 fields joined to
+    conn.log's byte counts (see stream_consumer.py's FlowByteEnricher); a
+    conn.log-only injection would silently never reach either detector's
+    real code path even though the endpoint reports success.
+
+    Every log file shares one global timestamp shift (computed from the
+    earliest ts across all of them) so a session's conn.log and ssl.log
+    rows land within FlowByteEnricher's PENDING_MAX_AGE of each other, the
+    same as they would arriving live off the wire.
     """
     pcap = REPLAY_PCAPS.get(threat)
     if pcap is None:
@@ -132,13 +282,27 @@ def replay(threat):
         subprocess.run(
             ["docker", "exec", ZEEK_CONTAINER, "sh", "-c",
              "rm -rf /tmp/replay && mkdir -p /tmp/replay && cd /tmp/replay && "
-             f"zeek -r /pcaps/{pcap} /usr/local/zeek/share/zeek/site/local.zeek"],
+             # -C: without it Zeek discards every packet with a
+             # (loopback-typical, checksum-offloaded) invalid checksum --
+             # harmless for the header-only ddos/recon/c2/dga pcaps, but it
+             # silently dropped all payload on the byte-heavy tls/exfil
+             # pcaps and meant ssl.log was never even written (same
+             # checksum-offload bug documented in ML_MODELS.md for the
+             # live -i lo process, missed here until the tls/exfil pcaps
+             # surfaced it).
+             f"zeek -C -r /pcaps/{pcap} /usr/local/zeek/share/zeek/site/local.zeek"],
             capture_output=True, text=True, timeout=30, check=True,
         )
-        result = subprocess.run(
-            ["docker", "exec", ZEEK_CONTAINER, "cat", "/tmp/replay/conn.log"],
-            capture_output=True, text=True, timeout=10, check=True,
-        )
+        raw_by_file = {}
+        for log_name in REPLAY_LOG_FILES:
+            result = subprocess.run(
+                ["docker", "exec", ZEEK_CONTAINER, "sh", "-c",
+                 f"cat /tmp/replay/{log_name} 2>/dev/null || true"],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+            lines = [l for l in result.stdout.strip().splitlines() if l]
+            if lines:
+                raw_by_file[log_name] = lines
     except subprocess.CalledProcessError as e:
         return jsonify({"status": "error", "message": f"zeek replay failed: {e.stderr.strip()}"}), 502
     except subprocess.TimeoutExpired:
@@ -146,36 +310,48 @@ def replay(threat):
     except FileNotFoundError:
         return jsonify({"status": "error", "message": "docker CLI not found on host"}), 500
 
-    events = []
-    for line in result.stdout.strip().splitlines():
+    if not raw_by_file:
+        return jsonify({"status": "error", "message": "replay produced no forwarded-log events"}), 502
+
+    events_by_file = {}
+    all_ts = []
+    for log_name, lines in raw_by_file.items():
+        events = []
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events.append(e)
+            all_ts.append(float(e.get("ts", 0)))
+        if events:
+            events_by_file[log_name] = events
+    if not all_ts:
+        return jsonify({"status": "error", "message": "replay produced no parseable events"}), 502
+
+    shift = time.time() - min(all_ts)
+    total_injected = 0
+    for log_name, events in events_by_file.items():
+        events.sort(key=lambda e: float(e.get("ts", 0)))
+        for e in events:
+            e["ts"] = float(e.get("ts", 0)) + shift
+        payload = "".join(json.dumps(e) + "\n" for e in events)
+
+        # Appended via `docker exec` (root inside the container), not a direct
+        # host-side file write: Zeek's live -i lo process runs as root and owns
+        # these bind-mounted files, so the Flask process (a normal user) can
+        # read them but not append to them directly.
         try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    if not events:
-        return jsonify({"status": "error", "message": "replay produced no conn.log events"}), 502
+            subprocess.run(
+                ["docker", "exec", "-i", ZEEK_CONTAINER, "sh", "-c",
+                 f"cat >> /usr/local/zeek/logs/current/{log_name}"],
+                input=payload, capture_output=True, text=True, timeout=10, check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            return jsonify({"status": "error", "message": f"failed to inject {log_name}: {e}"}), 502
+        total_injected += len(events)
 
-    earliest = min(float(e.get("ts", 0)) for e in events)
-    shift = time.time() - earliest
-    events.sort(key=lambda e: float(e.get("ts", 0)))
-    for e in events:
-        e["ts"] = float(e.get("ts", 0)) + shift
-    payload = "".join(json.dumps(e) + "\n" for e in events)
-
-    # Appended via `docker exec` (root inside the container), not a direct
-    # host-side file write: Zeek's live -i lo process runs as root and owns
-    # this bind-mounted file, so the Flask process (a normal user) can read
-    # it but not append to it directly.
-    try:
-        subprocess.run(
-            ["docker", "exec", "-i", ZEEK_CONTAINER, "sh", "-c",
-             "cat >> /usr/local/zeek/logs/current/conn.log"],
-            input=payload, capture_output=True, text=True, timeout=10, check=True,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        return jsonify({"status": "error", "message": f"failed to inject replayed events: {e}"}), 502
-
-    return jsonify({"status": "replayed", "threat": threat, "events_injected": len(events)})
+    return jsonify({"status": "replayed", "threat": threat, "events_injected": total_injected})
 
 
 @app.route("/api/clear", methods=["POST"])

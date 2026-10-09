@@ -8,6 +8,7 @@ import { THREAT_MATRIX } from '../data/threatMatrix'
 // for each of them. Nothing here claims a detector exists where it doesn't.
 function ThreatCoverageMatrix() {
   const implementedCount = THREAT_MATRIX.filter((t) => t.status === 'implemented').length
+  const allImplemented = implementedCount === THREAT_MATRIX.length
 
   return (
     <div className="threat-coverage">
@@ -15,7 +16,9 @@ function ThreatCoverageMatrix() {
       <p className="panel-subtitle threat-coverage__subtitle">
         All six threat classes named in the problem statement, and this prototype's actual
         coverage of each — {implementedCount} of {THREAT_MATRIX.length} implemented and
-        ML-validated, the rest architecturally designed but not yet built.
+        ML-validated{allImplemented
+          ? '. All six are trained inside this repo. DDoS/recon/C2 are real captured traffic; TLS/exfil are majority-real blended with a synthetic malicious-class top-up; DGA is synthetic, reproducing 9 published DGA algorithm families — see each row.'
+          : ', the rest architecturally designed but not yet built.'}
       </p>
 
       <ul className="threat-coverage__list">

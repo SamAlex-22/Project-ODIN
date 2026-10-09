@@ -35,9 +35,7 @@ trap cleanup EXIT
 
 # ---- 1. Docker infrastructure (Kafka + Zeek) ------------------------------
 echo "[1/7] Starting Docker infrastructure (Kafka, Zeek)..."
-docker rm -f zeek_monitor 2>/dev/null || true
-(cd "$SCRIPT_DIR" && docker compose down --remove-orphans 2>/dev/null || true)
-(cd "$SCRIPT_DIR" && docker compose up -d --remove-orphans)
+(cd "$SCRIPT_DIR" && docker compose up -d)
 
 # ---- 2. Wait for Kafka to actually be ready -------------------------------
 # Docker reporting the container "up" is not the same as the broker being

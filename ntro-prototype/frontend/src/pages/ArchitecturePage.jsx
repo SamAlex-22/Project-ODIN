@@ -40,7 +40,7 @@ const SYSTEM_NOTES = [
   'This dashboard reflects the software/API state of the monitoring pipeline, not the physical network.',
   'The browser cannot independently verify the physical health of the data diode itself.',
   'The current implementation is a prototype built for SIH 2026, not a production deployment.',
-  'The active detector set is limited to the three prototype detectors currently implemented.',
+  'All six threat classes named in the problem statement have a real detector implemented and trained entirely inside this repo; DDoS/recon/C2 are real captured traffic, TLS/exfil are majority-real with a synthetic malicious-class top-up, DGA is synthetic reproducing 9 published algorithm families — see the Threat Coverage matrix below.',
 ]
 
 // Actual on-the-wire/on-disk representation at each stage, as implemented:

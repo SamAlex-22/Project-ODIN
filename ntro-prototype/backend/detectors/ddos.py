@@ -2,42 +2,144 @@
 DDoS / SYN Flood Detector
 -------------------------
 Trigger condition is now a trained RandomForestClassifier
-(recon-ml-poc/train_model_ddos.py, GroupKFold-validated: F1 0.994 vs the
-old fixed-threshold rule's F1 0.921 -- see ../../ML_MODELS.md) instead of
-the hand-picked `packet_rate > 200` threshold. The rule missed 566/3870
-"low and slow" floods in validation (rate below the fixed threshold but
-still mechanically regular); the model catches almost all of them by
+(../../training/train_ddos.py, real hping3+socket traffic captured via
+../../training/capture/capture_ddos.py, GroupKFold-validated: F1 1.000 vs
+the old fixed-threshold rule's F1 0.927 on 16,309 rows/130 sessions -- see
+../../ML_MODELS.md) instead of the hand-picked `packet_rate > 200`
+threshold. The rule missed 842/6161 flood rows in validation (mostly
+"low and slow" floods below the fixed threshold); the model missed 2, by
 weighing port entropy and connection timing alongside rate, not rate alone.
 
-Feature vector matches recon-ml-poc/build_dataset_ddos.py's
+Feature vector matches ../../training/build_dataset_ddos.py's
 features_for_window() exactly -- packet_rate, unique_dst_ports,
-dst_port_entropy, mean_inter_arrival, std_inter_arrival over the same 10s
-window this detector already maintains. Source-IP entropy/unique-IP count
-(the original rule's supporting evidence) are kept purely as
-human-readable context below -- they were never part of the trained
-feature set (in this test rig every capture source is the same loopback
-address, so that signal was zero-variance during training; see
-ML_MODELS.md).
+dst_port_entropy, mean_inter_arrival, std_inter_arrival,
+unique_src_ips, src_ip_entropy, over the same 10s window this detector
+already maintains.
+
+2026-09-12 PS 26145 gap-closing update: source-IP entropy/unique-IP count
+used to be evidence-only ("this test rig's single loopback source made it
+zero-variance during training"). That constraint is now lifted -- real
+hping3 `--rand-source` traffic (genuinely varied, non-local source
+addresses that Zeek captures faithfully on loopback) gives real signal for
+this feature, so it's now a trained model input, not just display text.
+This also extends real coverage to PS 26145 (a)'s other two named DDoS
+patterns beyond plain SYN floods: UDP reflection/amplification (now
+accepted -- see the proto check below) and spoofed-source floods (the new
+src-IP features above). See ML_MODELS.md for the real capture methodology
+and retrained numbers.
 
 If the model file is missing or fails to load, falls back to the original
-fixed-threshold rule rather than disabling the detector.
+fixed-threshold rule rather than disabling the detector. Loads the
+Platt-calibrated model (ddos_model_calibrated.joblib) if present, else the
+base model -- see ../../calibration/calibrate_models.py. A calibrated file
+now exists (max confidence shift 0.250 vs base -- exceeds the 0.15 sanity
+bound, documented honestly in ML_MODELS.md rather than hidden).
+
+Adaptive entropy baseline (see AdaptiveEntropyBaseline below): tracks a
+rolling distribution of dst-port-entropy values and reports how many
+standard deviations the current value sits from it. The ML path's trigger
+decision does not depend on this -- it's surfaced as an extra evidence
+field either way, and it's what the fallback rule (used only when the ML
+model can't load) checks instead of the old flat packet-rate cutoff, so a
+model-load failure doesn't quietly reintroduce a flash-crowd false positive.
 """
 
-from collections import defaultdict, deque
+import statistics
+from collections import deque
 from pathlib import Path
 
 from .base import Detector
-from .features import shannon_entropy, interval_stats
+from .features import shannon_entropy, interval_stats, feature_contributions
 
 WINDOW_SECONDS        = 10
-PACKET_RATE_THRESHOLD = 200   # fallback-only: primary trigger if ML model unavailable
+PACKET_RATE_THRESHOLD = 200   # fallback-only: retained as evidence context, no longer the trigger
 UNIQUE_IP_SUPPORT     = 50    # supporting evidence only, never a trigger condition
+ALERT_COOLDOWN        = 30    # one alert per src_ip per 30s of *event* time -- matches recon.py
 
-MODEL_PATH = Path(__file__).parent.parent / "ml_models" / "ddos_model.joblib"
+BASE_MODEL_PATH       = Path(__file__).parent.parent / "ml_models" / "ddos_model.joblib"
+CALIBRATED_MODEL_PATH = Path(__file__).parent.parent / "ml_models" / "ddos_model_calibrated.joblib"
 FEATURES = [
     "packet_rate", "unique_dst_ports", "dst_port_entropy",
     "mean_inter_arrival", "std_inter_arrival",
+    "unique_src_ips", "src_ip_entropy",
 ]
+
+
+class AdaptiveEntropyBaseline:
+    """
+    Tracks a rolling 10-minute window of observed dst-port-entropy values.
+    Flags a value as anomalous when it deviates > 2 sigma from the rolling mean.
+    Falls back to a fixed threshold until MIN_SAMPLES accumulate.
+    Keyed on event ts (not wall-clock time), matching the Phase 1 cooldown fix --
+    so it tracks simulated/event time correctly under PCAP replay too.
+    """
+    WINDOW_SECONDS = 600
+    MIN_SAMPLES = 10
+    SIGMA_THRESHOLD = 2.0
+    FALLBACK_THRESHOLD = 1.5
+
+    def __init__(self):
+        self._history: deque = deque()  # [(ts, entropy_value)]
+
+    def _prune(self, now: float):
+        cutoff = now - self.WINDOW_SECONDS
+        while self._history and self._history[0][0] < cutoff:
+            self._history.popleft()
+
+    def update(self, ts: float, entropy_value: float) -> None:
+        self._history.append((ts, entropy_value))
+        self._prune(ts)
+
+    def is_anomalous(self, ts: float, current_entropy: float) -> tuple[bool, float]:
+        self._prune(ts)
+        if len(self._history) < self.MIN_SAMPLES:
+            return current_entropy < self.FALLBACK_THRESHOLD, 0.0
+        values = [v for _, v in self._history]
+        mean = statistics.mean(values)
+        stdev = max(statistics.stdev(values), 0.01)
+        deviation = abs(current_entropy - mean) / stdev
+        return deviation > self.SIGMA_THRESHOLD, round(deviation, 3)
+
+
+class SlowExhaustionTracker:
+    """
+    PS 26145 (a)'s named DDoS patterns (SYN floods, UDP reflection,
+    spoofed floods) are all high-RATE -- what the flood ML path's 10s
+    window and packet_rate/entropy features are tuned for. Slow HTTP
+    exhaustion (Slowloris, explicitly named in the PS's own suggested
+    dataset tooling: "Slowloris (slow HTTP exhaustion)") is the opposite
+    shape by design: deliberately under any rate threshold, few packets
+    per connection, connections held open for a long time instead.
+
+    Validated directly (2026-09-13): a real Slowloris run (120 sockets
+    held open ~50s each against a local target) scored 0/120 through the
+    flood ML path once connections were given a realistic, independently-
+    staggered close timeline (a real target's own per-connection timeout
+    firing on its own schedule, not an attacker script's synchronized
+    teardown loop bunching all 120 closes into one DDoSDetector.WINDOW_SECONDS
+    window). This needs a longer window and different features (duration,
+    byte count -- not rate) to catch at all, so it's a separate rule path
+    here, the same hybrid rule+ML pattern dga.py's tunnel path and
+    exfil.py's pattern pre-filter already use alongside their own ML paths,
+    rather than retraining the flood model around a second, much longer
+    window it was never designed for.
+    """
+    WINDOW_SECONDS = 300   # long enough to catch a realistically staggered
+    # close timeline; still bounded per PS 26145's streaming/latency requirement.
+    MIN_DURATION = 15.0    # a real page load/API call finishes well under this
+    MAX_BYTES = 500        # Slowloris's own incomplete headers are a few hundred bytes at most
+    TRIGGER_COUNT = 25     # concurrent/recent slow-shaped connections to one destination
+
+    def __init__(self):
+        self._recent = deque()  # [(ts, dst_ip, dst_port)]
+
+    def observe(self, ts: float, dst_ip: str, dst_port) -> tuple[bool, int]:
+        self._recent.append((ts, dst_ip, dst_port))
+        cutoff = ts - self.WINDOW_SECONDS
+        while self._recent and self._recent[0][0] < cutoff:
+            self._recent.popleft()
+        same_target = sum(1 for _, d_ip, d_port in self._recent if d_ip == dst_ip and d_port == dst_port)
+        return same_target >= self.TRIGGER_COUNT, same_target
 
 
 class DDoSDetector(Detector):
@@ -47,25 +149,107 @@ class DDoSDetector(Detector):
 
     def __init__(self):
         self._window = deque()   # [(ts, src_ip, dst_port)]
-        self.model = self._load_model()
+        self._last_alerted = {}  # src_ip (or "slow:<dst_ip>:<dst_port>") -> ts of last alert
+        self._entropy_baseline = AdaptiveEntropyBaseline()
+        self._slow_tracker = SlowExhaustionTracker()
+        self.model, self.calibrated = self._load_model()
 
     @staticmethod
     def _load_model():
         try:
             import joblib
-            return joblib.load(MODEL_PATH)
+            if CALIBRATED_MODEL_PATH.exists():
+                return joblib.load(CALIBRATED_MODEL_PATH), True
+            return joblib.load(BASE_MODEL_PATH), False
         except Exception as e:
             print(f"[ddos] ML model unavailable ({e}) -- falling back to fixed-threshold rule")
-            return None
+            return None, False
 
     def process(self, event: dict) -> dict | None:
-        if event.get("proto") != "tcp":
+        prep = self._prepare(event)
+        if prep is None:
+            return None
+        kind, payload = prep
+        if kind == "alert":
+            return payload
+        ctx = payload
+        vector = [[ctx["feat"][name] for name in FEATURES]]
+        confidence = float(self.model.predict_proba(vector)[0][1])
+        return self._finish(ctx, confidence > 0.5, confidence, self._ml_detection_line(confidence), used_ml=True)
+
+    def process_batch(self, events: list) -> list:
+        """See base.Detector.process_batch: state updates (window/cooldown/
+        entropy-baseline) happen per-event in order via _prepare(), exactly
+        as process() does; only the model call is deferred and batched
+        across every event in this call that actually needs scoring."""
+        results = [None] * len(events)
+        pending = []  # [(index, ctx), ...]
+        for i, event in enumerate(events):
+            prep = self._prepare(event)
+            if prep is None:
+                continue
+            kind, payload = prep
+            if kind == "alert":
+                results[i] = payload
+            else:
+                pending.append((i, payload))
+
+        if pending:
+            vectors = [[ctx["feat"][name] for name in FEATURES] for _, ctx in pending]
+            probas = self.model.predict_proba(vectors)[:, 1]
+            for (i, ctx), p in zip(pending, probas):
+                confidence = float(p)
+                results[i] = self._finish(
+                    ctx, confidence > 0.5, confidence, self._ml_detection_line(confidence), used_ml=True,
+                )
+        return results
+
+    @staticmethod
+    def _ml_detection_line(confidence: float) -> str:
+        return f"ML classifier (RandomForest) flagged this window as a flood (model confidence: {confidence:.0%})"
+
+    def _prepare(self, event: dict):
+        """Runs every event's state updates + non-ML gating/fallback exactly
+        once, in call order -- identical whether reached via process() or
+        process_batch(). Returns None (nothing to do), ("alert", alert-or-None)
+        (fully resolved -- slow-exhaustion path, or the no-model fallback
+        rule), or ("score", ctx) when an ML model call is still needed
+        (deferred so process_batch() can batch it across the whole buffer)."""
+        if event.get("proto") not in ("tcp", "udp"):
             return None
 
         ts       = event["ts"]
         src_ip   = event["src_ip"]
         dst_ip   = event["dst_ip"]
         dst_port = event["dst_port"]
+
+        # Path C: slow-exhaustion (rule-based, long window) -- checked
+        # ahead of the flood window/ML path below since it needs its own
+        # tracker state regardless of this event's flood-path outcome; see
+        # SlowExhaustionTracker's docstring for why this is a separate
+        # signal a 10s rate-tuned window structurally can't catch.
+        duration = float(event.get("duration", 0.0) or 0.0)
+        orig_bytes = int(event.get("orig_bytes", 0) or 0)
+        if duration > SlowExhaustionTracker.MIN_DURATION and orig_bytes < SlowExhaustionTracker.MAX_BYTES:
+            slow_triggered, slow_count = self._slow_tracker.observe(ts, dst_ip, dst_port)
+            slow_key = f"slow:{dst_ip}:{dst_port}"
+            if slow_triggered and ts - self._last_alerted.get(slow_key, 0) >= ALERT_COOLDOWN:
+                self._last_alerted[slow_key] = ts
+                evidence = [
+                    "Detection reason: many long-lived, low-byte connections held open to one "
+                    "destination (slow HTTP exhaustion / Slowloris-style pattern -- rule-based, "
+                    "distinct from the flood ML path above)",
+                    f"Connections matching this shape in the last {SlowExhaustionTracker.WINDOW_SECONDS}s: {slow_count}",
+                    f"This connection: duration {duration:.1f}s, {orig_bytes} bytes sent",
+                    f"Destination: {dst_ip}:{dst_port}",
+                ]
+                return ("alert", self.alert(
+                    src_ip=src_ip, src_port=None, dst_ip=dst_ip, dst_port=dst_port,
+                    flow_id=event.get("uid"), severity="HIGH",
+                    confidence=min(0.95, 0.6 + slow_count / 100),
+                    evidence=evidence, window_seconds=SlowExhaustionTracker.WINDOW_SECONDS,
+                    event_ts=ts, calibrated=False, detection_method="rule_based",
+                ))
 
         self._window.append((ts, src_ip, dst_port))
         cutoff = ts - WINDOW_SECONDS
@@ -86,29 +270,52 @@ class DDoSDetector(Detector):
             "dst_port_entropy": shannon_entropy(recent_ports),
             "mean_inter_arrival": mean_iat,
             "std_inter_arrival": std_iat,
+            "unique_src_ips": unique_ips,
+            "src_ip_entropy": src_entropy,
+        }
+
+        # Measure against history *before* folding the current sample in --
+        # otherwise the point under test biases its own baseline (self-masking).
+        anomalous, sigma = self._entropy_baseline.is_anomalous(ts, feat["dst_port_entropy"])
+        self._entropy_baseline.update(ts, feat["dst_port_entropy"])
+
+        ctx = {
+            "ts": ts, "src_ip": src_ip, "dst_ip": dst_ip, "dst_port": dst_port,
+            "flow_id": event.get("uid"), "feat": feat, "packet_rate": packet_rate,
+            "unique_ips": unique_ips, "src_entropy": src_entropy, "sigma": sigma,
         }
 
         if self.model is not None:
-            vector = [[feat[name] for name in FEATURES]]
-            prediction = self.model.predict(vector)[0]
-            confidence = float(self.model.predict_proba(vector)[0][1])
-            triggered = prediction == 1
-            detection_line = f"ML classifier (RandomForest) flagged this window as a flood (model confidence: {confidence:.0%})"
-        else:
-            triggered = packet_rate > PACKET_RATE_THRESHOLD
-            confidence = 0.6 + min((packet_rate / PACKET_RATE_THRESHOLD - 1) * 0.15, 0.35)
-            detection_line = "Detection reason: packet-rate threshold exceeded (fixed-threshold rule)"
+            return ("score", ctx)
 
+        confidence = 0.6 + min(sigma / 10, 0.35)
+        detection_line = "Detection reason: entropy deviates from adaptive rolling baseline (fallback rule)"
+        return ("alert", self._finish(ctx, anomalous, confidence, detection_line, used_ml=False))
+
+    def _finish(self, ctx: dict, triggered: bool, confidence: float, detection_line: str, used_ml: bool):
+        """Cooldown + evidence + alert-building -- shared by both the ML path
+        (process/process_batch, after a batched or single predict_proba call)
+        and the no-model fallback rule (_prepare), which previously
+        duplicated this whole block."""
         if not triggered:
             return None
+
+        ts, src_ip = ctx["ts"], ctx["src_ip"]
+        if ts - self._last_alerted.get(src_ip, 0) < ALERT_COOLDOWN:
+            return None
+        self._last_alerted[src_ip] = ts
+
+        feat, packet_rate, unique_ips = ctx["feat"], ctx["packet_rate"], ctx["unique_ips"]
+        src_entropy, sigma, dst_port = ctx["src_entropy"], ctx["sigma"], ctx["dst_port"]
 
         evidence = [
             detection_line,
             f"Packet rate: {packet_rate} connections/{WINDOW_SECONDS}s",
             f"Unique destination ports: {feat['unique_dst_ports']}",
             f"Destination port entropy: {feat['dst_port_entropy']:.2f} bits",
+            f"Entropy deviation from rolling baseline: {sigma}sigma",
             f"Unique source IPs: {unique_ips}",
-            f"Source IP entropy: {src_entropy} bits (informational, not a model input)",
+            f"Source IP entropy: {src_entropy} bits",
             f"Destination port: {dst_port}",
             f"Observation window: {WINDOW_SECONDS}s",
         ]
@@ -120,7 +327,10 @@ class DDoSDetector(Detector):
         severity = "CRITICAL" if packet_rate > PACKET_RATE_THRESHOLD * 3 else "HIGH"
 
         return self.alert(
-            src_ip=src_ip, src_port=None, dst_ip=dst_ip, dst_port=dst_port,
-            flow_id=event.get("uid"), severity=severity, confidence=confidence,
-            evidence=evidence, window_seconds=WINDOW_SECONDS,
+            src_ip=src_ip, src_port=None, dst_ip=ctx["dst_ip"], dst_port=dst_port,
+            flow_id=ctx["flow_id"], severity=severity, confidence=confidence,
+            evidence=evidence, window_seconds=WINDOW_SECONDS, event_ts=ts,
+            calibrated=(self.calibrated if used_ml else False),
+            detection_method=("ml" if used_ml else "rule_fallback_no_model"),
+            feature_contributions=(feature_contributions(self.model, FEATURES, feat) if used_ml else None),
         )

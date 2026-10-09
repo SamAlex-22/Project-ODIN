@@ -36,7 +36,7 @@ export const STAGES = [
     name: 'Detection Engine',
     description: 'Runs the active prototype threat detectors.',
     responsibility: 'Threat detection',
-    fullDesign: 'Six specialist models, one per PS-required threat class — see the Threat Coverage matrix below for which three are implemented and validated versus designed-not-built.',
+    fullDesign: 'Six specialist models, one per PS-required threat class, all implemented and trained inside this repo — see the Threat Coverage matrix below for each one\'s real-vs-synthetic training data breakdown.',
   },
   {
     name: 'Alert Engine',

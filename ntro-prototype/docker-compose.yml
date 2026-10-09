@@ -23,6 +23,7 @@ services:
       - NET_RAW
     volumes:
       - ./zeek/local.zeek:/usr/local/zeek/share/zeek/site/local.zeek
+      - ./zeek/scripts:/usr/local/zeek/share/zeek/site/scripts:ro
       - ./backend/zeek-logs:/usr/local/zeek/logs/current
       # Read-only pcaps for the dashboard's per-threat replay button (see
       # /api/replay in app.py) -- a second, offline `zeek -r` invocation
@@ -31,6 +32,6 @@ services:
       - ./traffic_pcaps:/pcaps:ro
     working_dir: /usr/local/zeek/logs/current
     command: >
-      zeek -i lo
+      zeek -C -i lo
       /usr/local/zeek/share/zeek/site/local.zeek
     restart: unless-stopped
